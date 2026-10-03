@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>TrueDub</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <img src="icons/32.png" alt="" width="24" height="24" />
+      <h1>TrueDub</h1>
+      <span id="status" class="status" data-state="checking">Checking…</span>
+    </header>
+
+    <section id="setup" class="setup" hidden>
+      <h2>Start the companion</h2>
+      <p>TrueDub translates and voices videos with a small app on your computer. Start it in a terminal:</p>
+      <pre><code>cd truedub/companion
+uv run truedub</code></pre>
+      <p>Keep it running while you watch. It listens on 127.0.0.1:7861.</p>
+    </section>
+
+    <main>
+      <label class="row">
+        <span>Voice</span>
+        <select id="voice"></select>
+      </label>
+      <label class="row">
+        <span>Spoken language</span>
+        <select id="sourceLang"></select>
+      </label>
+      <label class="row stacked">
+        <span>Original audio while dubbing <output id="duckValue"></output></span>
+        <input id="duck" type="range" min="0" max="100" step="5" />
+      </label>
+      <label class="row">
+        <span>English captions</span>
+        <input id="captions" type="checkbox" class="switch" />
+      </label>
+      <label class="row">
+        <span>Auto-dub every video</span>
+        <input id="autoDub" type="checkbox" class="switch" />
+      </label>
+    </main>
+
+    <footer>Press <kbd>Shift</kbd> + <kbd>D</kbd> on a video to toggle the dub.</footer>
+
+    <script src="settings.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

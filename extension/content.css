@@ -1,0 +1,104 @@
+/* The Dub button reuses .ytp-button, which also gives it the classic player's
+   red "on" underline. The modern player shows "on" as a filled icon instead. */
+.truedub-button svg {
+  display: block;
+  margin: auto;
+  stroke-linejoin: round;
+}
+.truedub-button[aria-pressed='true'] .truedub-fill {
+  fill: #fff;
+}
+
+/* Full-size overlay for the status pill (top centre, where YouTube shows its own
+   notices) and captions. Container units size the captions. */
+.truedub-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 45;
+  pointer-events: none;
+  container-type: size;
+  font-family: 'YouTube Noto', Roboto, Arial, Helvetica, sans-serif;
+}
+
+.truedub-pill {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(360px, calc(100% - 24px));
+  padding: 7px 14px 7px 11px;
+  border-radius: 18px;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(8px);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+  opacity: 0;
+  transform: translate(-50%, -4px);
+  transition: opacity 0.2s, transform 0.2s;
+}
+.ytp-fullscreen .truedub-pill {
+  top: 72px; /* below the fullscreen title */
+}
+.truedub-pill.truedub-visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+.truedub-pill-icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  border-radius: 50%;
+}
+.truedub-pill[data-state='busy'] .truedub-pill-icon {
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  animation: truedub-spin 0.8s linear infinite;
+}
+.truedub-pill[data-state='ok'] .truedub-pill-icon {
+  width: 8px;
+  height: 8px;
+  margin: 2px;
+  background: #3ea6ff;
+}
+.truedub-pill[data-state='error'] .truedub-pill-icon {
+  width: 8px;
+  height: 8px;
+  margin: 2px;
+  background: #ff4e45;
+}
+@keyframes truedub-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Styled like YouTube's captions; sits above the controls and drops when they hide. */
+.truedub-caption {
+  position: absolute;
+  left: 50%;
+  bottom: 76px;
+  max-width: 80%;
+  transform: translateX(-50%);
+  text-align: center;
+  transition: bottom 0.25s cubic-bezier(0, 0, 0.2, 1);
+}
+.ytp-autohide .truedub-caption {
+  bottom: 24px;
+}
+.truedub-caption[hidden] {
+  display: none;
+}
+.truedub-caption span {
+  padding: 0.1em 0.3em;
+  background: rgba(8, 8, 8, 0.75);
+  color: #fff;
+  font-size: clamp(14px, 4cqh, 44px);
+  line-height: 1.35;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
