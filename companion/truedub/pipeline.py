@@ -5,6 +5,7 @@ so audio starts quickly; chunks that continue the previous one are longer.
 
 Cache layout under ~/.cache/truedub/<video_id>/:
     audio.wav                                   16 kHz mono source audio
+    context.txt                                 title and description line, prompted to Whisper
     language.txt                                language detected for source_lang "auto"
     <model>/<lang>/asr/<start>_<end>.json       cleaned English segments, shared by voices
     <model>/<lang>/<voice>/<start>_<end>.json   finished segments of a chunk
@@ -16,6 +17,7 @@ import json
 import logging
 import math
 import re
+import textwrap
 import threading
 import time
 from dataclasses import dataclass, field
@@ -187,6 +189,13 @@ def split_long(seg: dict, max_s: float = 12) -> list[dict]:
     return out
 
 
+def video_context(info: dict) -> str:
+    """The title and first description line: names and terms for Whisper to spell right."""
+    title = info.get("title") or ""
+    lines = (info.get("description") or "").strip().splitlines()
+    return f"{title}. {textwrap.shorten(lines[0], 150, placeholder='')}" if lines else title
+
+
 def netscape_cookies(cookies: list[dict]) -> str:
     """Browser cookies as a Netscape cookies.txt, the format yt-dlp reads. Expiry 0: session."""
     lines = ["# Netscape HTTP Cookie File"]
@@ -257,8 +266,13 @@ class Job:
 
     def state(self) -> dict:
         processed = self.processed()
+        status = self.status
+        if status == "processing" and not asr.loaded():
+            status = "loading"
+        elif status == "processing" and self.language is None:
+            status = "detecting"
         return {
-            "status": self.status,
+            "status": status,
             "error": self.error,
             "duration": self.duration,
             "progress": round(sum(b - a for a, b in processed) / self.duration, 4)
@@ -344,7 +358,7 @@ def _decode(path: Path) -> np.ndarray:
     return np.concatenate(parts)
 
 
-def _fetch(video_id: str, folder: Path, cookies: io.StringIO | None = None) -> Path:
+def _fetch(video_id: str, folder: Path, cookies: io.StringIO | None = None) -> tuple[Path, dict]:
     options = {
         "format": "bestaudio/best",
         "outtmpl": str(folder / "source.%(ext)s"),
@@ -358,19 +372,26 @@ def _fetch(video_id: str, folder: Path, cookies: io.StringIO | None = None) -> P
     }
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}")
-        return Path(ydl.prepare_filename(info))
+        return Path(ydl.prepare_filename(info)), info
 
 
 def _download(video_id: str, folder: Path, cookies: list[dict]) -> None:
     folder.mkdir(parents=True, exist_ok=True)
     try:
-        source = _fetch(video_id, folder)
+        source, info = _fetch(video_id, folder)
     except yt_dlp.utils.DownloadError as e:
-        if not cookies or "not a bot" not in str(e):
+        if "not a bot" not in str(e):
+            # Often transient (HTTP 403 on a media URL, a dropped connection); a second
+            # attempt fetches fresh URLs.
+            log.info("%s: download failed, retrying: %s", video_id, _message(e))
+            source, info = _fetch(video_id, folder)
+        elif cookies:
+            # The cookies stay in memory: yt-dlp reads them from a stream, never a file.
+            log.info("%s: YouTube bot check, retrying with the browser's cookies", video_id)
+            source, info = _fetch(video_id, folder, io.StringIO(netscape_cookies(cookies)))
+        else:
             raise
-        # The cookies stay in memory: yt-dlp reads them from a stream, never a file.
-        log.info("%s: YouTube bot check, retrying with the browser's cookies", video_id)
-        source = _fetch(video_id, folder, io.StringIO(netscape_cookies(cookies)))
+    (folder / "context.txt").write_text(video_context(info), encoding="utf-8")
     tmp = folder / "audio.tmp.wav"
     sf.write(tmp, _decode(source), SR, subtype="PCM_16")
     tmp.replace(folder / "audio.wav")
@@ -387,6 +408,8 @@ def _prepare(job: Job) -> None:
         db = frame_db(audio)
         detected = job.dir / "language.txt"
         with lock:
+            if job.status == "error":  # the model failed to load during the download
+                return
             job.db, job.duration = db, round(len(db) / FPS, 2)
             if job.source_lang != "auto":
                 job.language = job.source_lang
@@ -404,12 +427,17 @@ def _prepare(job: Job) -> None:
 
 
 def _detect_language(job: Job) -> str:
-    """Sum language probabilities over 30 s samples spread across the video."""
-    starts = [job.duration * (k + 0.5) / 5 for k in range(5)]
+    """Sum language probabilities over three 30 s samples spread across the video.
+
+    Each sample costs an encoder pass, seconds on a laptop CPU. Three keep one odd sample
+    (music, a quote in another language) from deciding.
+    """
+    t = time.monotonic()
+    starts = [job.duration * (k + 0.5) / 3 for k in range(3)]
     probs = [asr.language_probs(_read(job, s, s + 30)) for s in starts]
     language = pick_language(probs)
     (job.dir / "language.txt").write_text(language)
-    log.info("%s: detected language %s", job.video_id, language)
+    log.info("%s: detected language %s in %.1fs", job.video_id, language, time.monotonic() - t)
     return language
 
 
@@ -426,6 +454,11 @@ def _translate(job: Job, chunk: Range) -> list[dict]:
     prompt = PROMPT
     if previous:
         prompt = " ".join(s["text"] for s in json.loads(previous[0].read_text()))[-200:] or PROMPT
+    # The video's title and description spell out its names and jargon (RAG, not "rack").
+    # Whisper cuts a prompt over 223 tokens from the start, so the recent text goes last.
+    context = job.dir / "context.txt"
+    if context.exists():
+        prompt = f"{context.read_text(encoding='utf-8')} {prompt}"
     kept = []
     for seg in asr.translate(audio, job.language, prompt):
         a, b = seg["start"], min(seg["end"], end - start)
@@ -460,9 +493,16 @@ def _process(job: Job, chunk: Range) -> list[dict]:
 
 
 def _pick() -> tuple[Job, Range | None] | None:
-    """The most recently polled job with work left, and its next chunk (None: detect language)."""
+    """The most recently polled job with work left, and its next chunk.
+
+    None instead of a chunk: load the model (while the audio downloads) and detect the language.
+    """
     for job in sorted(jobs.values(), key=lambda j: j.polled, reverse=True):
-        if job.status != "processing" or time.monotonic() - job.polled > IDLE:
+        if time.monotonic() - job.polled > IDLE:
+            continue
+        if job.status == "downloading" and not asr.loaded():
+            return job, None
+        if job.status != "processing":
             continue
         if job.language is None:
             return job, None
@@ -481,10 +521,14 @@ def _work() -> None:
         job, chunk = picked
         try:
             if chunk is None:
-                language = _detect_language(job)
+                asr.load()
                 with lock:
-                    job.language = language
-                    job.load_cache()
+                    detect = job.status == "processing" and job.language is None
+                if detect:
+                    language = _detect_language(job)
+                    with lock:
+                        job.language = language
+                        job.load_cache()
                 continue
             t = time.monotonic()
             segs = _process(job, chunk)

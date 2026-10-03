@@ -17,6 +17,7 @@ from truedub.pipeline import (
     pick_language,
     quietest,
     split_long,
+    video_context,
 )
 
 
@@ -216,3 +217,11 @@ def test_netscape_cookies_load_in_yt_dlp():
     assert cookies["SID"].expires == 1893456000
     assert cookies["PREF"].domain == "www.youtube.com" and not cookies["PREF"].domain_specified
     assert cookies["PREF"].expires is None  # session cookie
+
+
+def test_video_context_uses_title_and_first_description_line():
+    info = {"title": "Spring AI & RAG", "description": "\nUsing PGVector.\nLinks: https://x.y"}
+    assert video_context(info) == "Spring AI & RAG. Using PGVector."
+    assert video_context({"title": "T", "description": "word " * 100}).endswith("word")
+    assert len(video_context({"title": "T", "description": "word " * 100})) <= 3 + 150
+    assert video_context({"title": "T", "description": None}) == "T"

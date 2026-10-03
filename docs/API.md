@@ -52,7 +52,7 @@ a job pauses after two minutes without a poll and resumes on the next one.
 
 ```json
 {
-  "status": "downloading | processing | done | error",
+  "status": "downloading | loading | detecting | processing | done | error",
   "error": null,
   "duration": 812.4,
   "progress": 0.37,
@@ -63,6 +63,9 @@ a job pauses after two minutes without a poll and resumes on the next one.
 }
 ```
 
+- `status`: `downloading` the audio, `loading` the Whisper model (it downloads on
+  first use), `detecting` the spoken language, `processing` the dub, `done`, or
+  `error` (then `error` says why).
 - `duration` is `null` until the audio is downloaded.
 - `processed` lists the sorted, merged time ranges that are fully done (ASR and
   TTS, silent parts included). When the playhead reaches a time outside these

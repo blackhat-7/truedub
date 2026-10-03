@@ -12,6 +12,12 @@ const START_LEAD = 0.05; // seconds between play() and audible output; clips are
 const BUFFER_AHEAD = 20; // seconds of processed timeline needed before a paused video resumes
 const MIN_AHEAD = 0.3; // the video pauses when less than this is processed ahead of the playhead
 const SVG_NS = 'http://www.w3.org/2000/svg';
+// Server statuses before any dub is ready, see docs/API.md.
+const STAGES = {
+  downloading: 'Downloading audio…',
+  loading: 'Loading speech model…',
+  detecting: 'Detecting language…',
+};
 
 const log = (...args) => console.debug('[TrueDub]', ...args);
 
@@ -93,7 +99,7 @@ class Dub {
 
   report({ status, progress }) {
     if (this.buffering) this.status = status; // tick() owns the pill while buffering
-    else if (status === 'downloading') setPill('Downloading audio…');
+    else if (STAGES[status]) setPill(STAGES[status]);
     else if (status === 'processing') setPill(`Translating… ${Math.round(progress * 100)}%`);
     else if (status === 'done' && this.status !== 'done') setPill('English dub ready', 'ok', 3000);
     this.status = status;
@@ -245,7 +251,7 @@ class Dub {
   }
 
   bufferingPill(ahead) {
-    setPill(this.status === 'downloading' ? 'Downloading audio…' : `Dubbing ahead… ${Math.floor(ahead)} s ready`);
+    setPill(STAGES[this.status] ?? `Dubbing ahead… ${Math.floor(ahead)} s ready`);
   }
 
   resume() {

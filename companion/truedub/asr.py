@@ -1,6 +1,7 @@
 """Whisper speech-to-English: mlx-whisper on Apple silicon, faster-whisper elsewhere.
 
-The model loads lazily on first use. Only the pipeline worker thread calls into this module.
+The model loads on first use, or on load(). Only the pipeline worker thread calls into this
+module, except loaded().
 """
 
 import platform
@@ -26,9 +27,15 @@ if MLX:
     def _repo() -> str:
         return f"mlx-community/whisper-{model}-mlx"
 
+    def load():
+        return ModelHolder.get_model(_repo(), mx.float16)
+
+    def loaded() -> bool:
+        return ModelHolder.model_path == _repo()
+
     def language_probs(audio: np.ndarray) -> dict[str, float]:
         """Language probabilities for the first 30 s of 16 kHz mono audio."""
-        whisper = ModelHolder.get_model(_repo(), mx.float16)
+        whisper = load()
         mel = log_mel_spectrogram(audio, n_mels=whisper.dims.n_mels, padding=N_SAMPLES)
         _, probs = whisper.detect_language(pad_or_trim(mel, N_FRAMES, axis=-2).astype(mx.float16))
         return probs
@@ -55,7 +62,10 @@ else:
     model = "large-v3" if DEVICE == "cuda" else "medium"
     _whisper = None
 
-    def _model() -> WhisperModel:
+    def loaded() -> bool:
+        return _whisper is not None
+
+    def load() -> WhisperModel:
         global _whisper
         if _whisper is None:
             if DEVICE == "cuda":
@@ -69,11 +79,11 @@ else:
 
     def language_probs(audio: np.ndarray) -> dict[str, float]:
         """Language probabilities for the first 30 s of 16 kHz mono audio."""
-        _, _, probs = _model().detect_language(audio)
+        _, _, probs = load().detect_language(audio)
         return dict(probs)
 
     def translate(audio: np.ndarray, language: str, prompt: str) -> list[dict]:
-        segments, _ = _model().transcribe(
+        segments, _ = load().transcribe(
             audio,
             task="translate",
             language=language,
