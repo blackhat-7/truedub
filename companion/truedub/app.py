@@ -16,10 +16,20 @@ from . import __version__, asr, pipeline, tts
 app = FastAPI(title="TrueDub companion", version=__version__)
 
 
+class Cookie(BaseModel):
+    name: str
+    value: str
+    domain: str
+    path: str = "/"
+    secure: bool = False
+    expires: float = 0  # Unix time; 0 for a session cookie
+
+
 class DubRequest(BaseModel):
     video_id: str
     source_lang: str = "auto"
     voice: str = "am_michael"
+    cookies: list[Cookie] = []
 
 
 @app.get("/health")
@@ -40,7 +50,8 @@ def dub(request: DubRequest):
         raise HTTPException(400, f"Unknown source_lang {request.source_lang!r}")
     if request.voice not in tts.voices():
         raise HTTPException(400, f"Unknown voice {request.voice!r}")
-    job = pipeline.submit(request.video_id, request.source_lang, request.voice)
+    cookies = [c.model_dump() for c in request.cookies]
+    job = pipeline.submit(request.video_id, request.source_lang, request.voice, cookies)
     return {"job": job.id}
 
 
@@ -77,7 +88,9 @@ def main() -> None:
         log = open(pipeline.CACHE / "truedub.log", "a", buffering=1, encoding="utf-8")  # noqa: SIM115
         sys.stdout = sys.stderr = log
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    logging.getLogger("phonemizer").setLevel(logging.ERROR)  # noisy word-count warnings
+    # Noisy word-count warnings. phonemizer resets its logger's level on every call, so
+    # stop them reaching the root handler instead.
+    logging.getLogger("phonemizer").propagate = False
     tts.download_models()
     pipeline.start_worker()
     uvicorn.run(app, host="127.0.0.1", port=7861)

@@ -21,7 +21,14 @@ job, and finished work is served from the on-disk cache.
 Request:
 
 ```json
-{ "video_id": "dQw4w9WgXcQ", "source_lang": "auto", "voice": "am_michael" }
+{
+  "video_id": "dQw4w9WgXcQ",
+  "source_lang": "auto",
+  "voice": "am_michael",
+  "cookies": [
+    { "name": "SID", "value": "...", "domain": ".youtube.com", "path": "/", "secure": true, "expires": 1893456000 }
+  ]
+}
 ```
 
 `source_lang` is a Whisper language code, or `"auto"`. Auto detects the language
@@ -29,12 +36,19 @@ from the audio itself and never picks the target language (English): the user
 only presses Dub on speech they cannot understand. Mixed speech such as Hinglish
 often scores as English, which is exactly the bug YouTube's auto-dub has.
 
+`cookies` is optional: the browser's youtube.com cookies (`expires` is Unix time,
+0 for a session cookie). The companion uses them only as a fallback, when
+downloading the audio fails with YouTube's "Sign in to confirm you're not a
+bot" check, and retries once with them. They are kept in memory for that one
+download, never written to disk and never logged.
+
 Response: `{ "job": "<job id>" }`
 
 ## `GET /dub/{job}?at=<seconds>`
 
 Poll job state. `at` is the current playhead. The server processes the part of
-the video at or after the playhead first, so seeking reprioritises work.
+the video at or after the playhead first, so seeking reprioritises work. Work on
+a job pauses after two minutes without a poll and resumes on the next one.
 
 ```json
 {

@@ -93,6 +93,9 @@
 .truedub-caption[hidden] {
   display: none;
 }
+.truedub-captioning .ytp-caption-window-container {
+  display: none;
+}
 .truedub-caption span {
   padding: 0.1em 0.3em;
   background: rgba(8, 8, 8, 0.75);

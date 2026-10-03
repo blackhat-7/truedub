@@ -1,5 +1,8 @@
+import io
+
 import numpy as np
 import pytest
+from yt_dlp.cookies import YoutubeDLCookieJar
 
 from truedub import tts
 from truedub.pipeline import (
@@ -9,6 +12,7 @@ from truedub.pipeline import (
     is_junk,
     merge_ranges,
     merge_segments,
+    netscape_cookies,
     next_chunk,
     pick_language,
     quietest,
@@ -181,3 +185,34 @@ def test_fit_clip_truncates_with_fade():
     assert len(clip) == 2 * tts.SR
     assert clip[-1] == pytest.approx(0)
     assert clip[0] == pytest.approx(0.5)
+
+
+def test_netscape_cookies_load_in_yt_dlp():
+    text = netscape_cookies(
+        [
+            {
+                "name": "SID",
+                "value": "a=b",
+                "domain": ".youtube.com",
+                "path": "/",
+                "secure": True,
+                "expires": 1893456000.5,
+            },
+            {
+                "name": "PREF",
+                "value": "x",
+                "domain": "www.youtube.com",
+                "path": "/",
+                "secure": False,
+                "expires": 0,
+            },
+        ]
+    )
+    assert text.splitlines()[1] == ".youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\ta=b"
+    jar = YoutubeDLCookieJar(io.StringIO(text))
+    jar.load()
+    cookies = {c.name: c for c in jar}
+    assert cookies["SID"].value == "a=b" and cookies["SID"].secure
+    assert cookies["SID"].expires == 1893456000
+    assert cookies["PREF"].domain == "www.youtube.com" and not cookies["PREF"].domain_specified
+    assert cookies["PREF"].expires is None  # session cookie

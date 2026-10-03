@@ -227,7 +227,7 @@ class Dub {
       } else if (ahead >= Math.min(BUFFER_AHEAD, this.duration - t - 1)) {
         this.resume();
       } else {
-        setPill(`Dubbing ahead… ${Math.floor(ahead)} s ready`);
+        this.bufferingPill(ahead);
       }
       return;
     }
@@ -240,8 +240,12 @@ class Dub {
       this.pausedAt = performance.now();
       v.pause();
       log('buffering at', t.toFixed(2));
-      setPill(`Dubbing ahead… ${Math.floor(ahead)} s ready`);
+      this.bufferingPill(ahead);
     }
+  }
+
+  bufferingPill(ahead) {
+    setPill(this.status === 'downloading' ? 'Downloading audio…' : `Dubbing ahead… ${Math.floor(ahead)} s ready`);
   }
 
   resume() {
@@ -410,6 +414,7 @@ function showCaption(text) {
   if (!ui || ui.captionText.textContent === text) return;
   ui.captionText.textContent = text;
   ui.caption.hidden = !text;
+  ui.player.classList.toggle('truedub-captioning', !!text); // hides YouTube's captions under ours
 }
 
 async function waitForPlayer() {

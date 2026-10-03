@@ -11,6 +11,7 @@ Cache layout under ~/.cache/truedub/<video_id>/:
     <model>/<lang>/<voice>/<id>.wav             dubbed clips
 """
 
+import io
 import json
 import logging
 import math
@@ -39,6 +40,7 @@ LONG = 45.0  # chunks continuing the previous one, for context and throughput
 # Whisper copies the prompt's style: a punctuated prompt gives punctuated sentences,
 # which Kokoro voices with natural pauses.
 PROMPT = "Okay, let's continue."
+IDLE = 120.0  # seconds without a poll before a job's work pauses (the tab was closed)
 
 Range = tuple[float, float]
 
@@ -185,6 +187,18 @@ def split_long(seg: dict, max_s: float = 12) -> list[dict]:
     return out
 
 
+def netscape_cookies(cookies: list[dict]) -> str:
+    """Browser cookies as a Netscape cookies.txt, the format yt-dlp reads. Expiry 0: session."""
+    lines = ["# Netscape HTTP Cookie File"]
+    for c in cookies:
+        subdomains = "TRUE" if c["domain"].startswith(".") else "FALSE"
+        secure = "TRUE" if c["secure"] else "FALSE"
+        expires = str(int(c["expires"]))
+        fields = (c["domain"], subdomains, c["path"], secure, expires, c["name"], c["value"])
+        lines.append("\t".join(fields))
+    return "\n".join(lines) + "\n"
+
+
 # ---------------------------------------------------------------- jobs
 
 
@@ -205,6 +219,8 @@ class Job:
     video_id: str
     source_lang: str
     voice: str
+    # The browser's YouTube cookies, for a download that hits the bot check. Never written to disk.
+    cookies: list[dict] = field(default_factory=list, repr=False)
     status: str = "downloading"
     error: str | None = None
     duration: float | None = None
@@ -259,9 +275,9 @@ jobs: dict[str, Job] = {}
 lock = threading.Condition()
 
 
-def submit(video_id: str, source_lang: str, voice: str) -> Job:
+def submit(video_id: str, source_lang: str, voice: str, cookies: list[dict]) -> Job:
     """Get or start the job for these inputs. A failed job is retried."""
-    job = Job(video_id, source_lang, voice)
+    job = Job(video_id, source_lang, voice, cookies)
     with lock:
         existing = jobs.get(job.id)
         if existing and existing.status != "error":
@@ -328,8 +344,7 @@ def _decode(path: Path) -> np.ndarray:
     return np.concatenate(parts)
 
 
-def _download(video_id: str, folder: Path) -> None:
-    folder.mkdir(parents=True, exist_ok=True)
+def _fetch(video_id: str, folder: Path, cookies: io.StringIO | None = None) -> Path:
     options = {
         "format": "bestaudio/best",
         "outtmpl": str(folder / "source.%(ext)s"),
@@ -339,10 +354,23 @@ def _download(video_id: str, folder: Path) -> None:
         "noplaylist": True,
         # YouTube needs a JS runtime; the deno package ships one with the Python deps.
         "js_runtimes": {"deno": {"path": deno.find_deno_bin()}},
+        "cookiefile": cookies,
     }
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}")
-        source = Path(ydl.prepare_filename(info))
+        return Path(ydl.prepare_filename(info))
+
+
+def _download(video_id: str, folder: Path, cookies: list[dict]) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        source = _fetch(video_id, folder)
+    except yt_dlp.utils.DownloadError as e:
+        if not cookies or "not a bot" not in str(e):
+            raise
+        # The cookies stay in memory: yt-dlp reads them from a stream, never a file.
+        log.info("%s: YouTube bot check, retrying with the browser's cookies", video_id)
+        source = _fetch(video_id, folder, io.StringIO(netscape_cookies(cookies)))
     tmp = folder / "audio.tmp.wav"
     sf.write(tmp, _decode(source), SR, subtype="PCM_16")
     tmp.replace(folder / "audio.wav")
@@ -351,9 +379,10 @@ def _download(video_id: str, folder: Path) -> None:
 
 def _prepare(job: Job) -> None:
     """Download the audio (cached), then hand the job to the worker."""
+    cookies, job.cookies = job.cookies, []  # only this download may use them
     try:
         if not (job.dir / "audio.wav").exists():
-            _download(job.video_id, job.dir)
+            _download(job.video_id, job.dir, cookies)
         audio, _ = sf.read(job.dir / "audio.wav", dtype="float32")
         db = frame_db(audio)
         detected = job.dir / "language.txt"
@@ -433,7 +462,7 @@ def _process(job: Job, chunk: Range) -> list[dict]:
 def _pick() -> tuple[Job, Range | None] | None:
     """The most recently polled job with work left, and its next chunk (None: detect language)."""
     for job in sorted(jobs.values(), key=lambda j: j.polled, reverse=True):
-        if job.status != "processing":
+        if job.status != "processing" or time.monotonic() - job.polled > IDLE:
             continue
         if job.language is None:
             return job, None
