@@ -12,6 +12,11 @@
       "matches": ["https://www.youtube.com/*"],
       "js": ["settings.js", "content.js"],
       "css": ["content.css"]
+    },
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["captions.js"],
+      "world": "MAIN"
     }
   ],
   "action": {

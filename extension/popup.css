@@ -142,6 +142,9 @@ select {
   appearance: none;
   cursor: pointer;
 }
+.row.stacked select {
+  max-width: none;
+}
 select:focus-visible,
 input:focus-visible {
   outline: 2px solid var(--accent);

@@ -43,6 +43,18 @@ const LANGUAGES = [
 
 const $ = (id) => document.getElementById(id);
 
+const FAST = ['youtube', 'Fast — YouTube’s translation (recommended)'];
+const MODEL_NOTES = {
+  small: 'small (faster, less accurate)',
+  'large-v3': 'large-v3 (best; needs a GPU or Apple silicon)',
+};
+
+// Whisper models run in the companion, on the user's computer.
+function modelOption(model, defaultModel) {
+  const note = model === defaultModel ? ' · default' : '';
+  return [model, `On this computer — ${MODEL_NOTES[model] ?? model}${note}`];
+}
+
 // Kokoro voice ids look like "am_michael": accent, gender, name.
 function voiceLabel(id) {
   const [, accent, gender, name] = id.match(/^([a-z])([fm])_(.+)$/) || [];
@@ -68,6 +80,7 @@ function showDuck(value) {
 async function init() {
   const settings = await chrome.storage.sync.get(DEFAULTS);
 
+  fill($('engine'), settings.engine === FAST[0] ? [FAST] : [FAST, modelOption(settings.engine)], settings.engine);
   fill($('sourceLang'), LANGUAGES, settings.sourceLang);
   fill($('voice'), [[settings.voice, voiceLabel(settings.voice)]], settings.voice);
   $('duck').value = settings.duck * 100;
@@ -75,6 +88,7 @@ async function init() {
   $('captions').checked = settings.captions;
   $('autoDub').checked = settings.autoDub;
 
+  $('engine').onchange = (e) => save('engine', e.target.value);
   $('voice').onchange = (e) => save('voice', e.target.value);
   $('sourceLang').onchange = (e) => save('sourceLang', e.target.value);
   $('duck').oninput = (e) => showDuck(e.target.value / 100);
@@ -91,11 +105,14 @@ async function init() {
     $('setup').hidden = false;
     return;
   }
-  const { version, asr, voices } = health.data;
+  const { version, asr, voices, models, default_model: defaultModel } = health.data;
   status.dataset.state = 'online';
   status.textContent = 'Companion ready';
-  $('model').textContent = `Speech model: ${asr} · companion ${version}`;
+  $('model').textContent = `Local model: ${asr} · companion ${version}`;
   $('model').hidden = false;
+  const engine = models.includes(settings.engine) ? settings.engine : FAST[0];
+  fill($('engine'), [FAST, ...models.map((m) => modelOption(m, defaultModel))], engine);
+  if (engine !== settings.engine) save('engine', engine);
   if (voices.length) {
     const voice = voices.includes(settings.voice) ? settings.voice : voices[0];
     fill($('voice'), voices.map((v) => [v, voiceLabel(v)]), voice);

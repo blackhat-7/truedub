@@ -19,20 +19,26 @@ async function request(path, options) {
 const handlers = {
   health: () => request('/health').then((r) => r.json()),
 
-  // The companion uses the cookies only if YouTube asks it to prove it isn't a bot.
-  start: async ({ videoId, sourceLang, voice }) => {
-    const cookies = (await chrome.cookies.getAll({ domain: 'youtube.com' })).map((c) => ({
-      name: c.name,
-      value: c.value,
-      domain: c.domain,
-      path: c.path,
-      secure: c.secure,
-      expires: c.expirationDate ?? 0,
-    }));
+  // With a transcript the companion only voices it. Without one it downloads the
+  // audio, and uses the cookies only if YouTube asks it to prove it isn't a bot.
+  start: async ({ videoId, sourceLang, model, voice, transcript }) => {
+    const body = { video_id: videoId, source_lang: sourceLang, model, voice };
+    if (transcript) {
+      body.transcript = transcript;
+    } else {
+      body.cookies = (await chrome.cookies.getAll({ domain: 'youtube.com' })).map((c) => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain,
+        path: c.path,
+        secure: c.secure,
+        expires: c.expirationDate ?? 0,
+      }));
+    }
     const res = await request('/dub', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ video_id: videoId, source_lang: sourceLang, voice, cookies }),
+      body: JSON.stringify(body),
     });
     return res.json();
   },

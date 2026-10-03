@@ -1,7 +1,7 @@
 """A fake TrueDub companion for testing the extension without the real models.
 
 Implements docs/API.md with made-up segments every 5 s and a speech-free gap
-from 120 s to 150 s. Work is finished at SPEED seconds of video per second,
+from 120 s to 150 s, or, when the request has a transcript, its segments as sent. Work is finished at SPEED seconds of video per second,
 starting at the playhead, like the real server. Clips are spoken with macOS
 `say`, so this runs on macOS only.
 
@@ -29,14 +29,15 @@ SEGMENTS = [
 SPEED = float(sys.argv[1]) if len(sys.argv) > 1 else 20.0
 CLIPS = Path(tempfile.mkdtemp(prefix="truedub-mock-"))
 
-jobs = {}  # job id -> {"done": set of finished indexes into SEGMENTS, "credit": seconds, "t": last poll}
+jobs = {}  # job id -> {"segments", "duration", "done": set of finished indexes, "credit": seconds, "t": last poll}
 lock = threading.Lock()
 
 
-def span(i):
+def span(job, i):
     """The timeline a finished segment covers: itself plus the silence up to the next one."""
-    end = SEGMENTS[i + 1]["start"] if i + 1 < len(SEGMENTS) else DURATION
-    return [0.0 if i == 0 else SEGMENTS[i]["start"], end]
+    segs = job["segments"]
+    end = segs[i + 1]["start"] if i + 1 < len(segs) else job["duration"]
+    return [0.0 if i == 0 else segs[i]["start"], end]
 
 
 def merged(spans):
@@ -49,11 +50,11 @@ def merged(spans):
     return out
 
 
-def clip(i):
-    path = CLIPS / f"{i}.wav"
+def clip(job_id, i):
+    path = CLIPS / f"{abs(hash((job_id, i)))}.wav"
     with lock:
         if not path.exists():
-            text = SEGMENTS[i]["text"]
+            text = jobs[job_id]["segments"][i]["text"]
             subprocess.run(
                 ["say", "-r", "210", "-o", str(path), "--file-format=WAVE", "--data-format=LEI16@24000", text],
                 check=True,
@@ -75,13 +76,13 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         if url.path == "/health":
             return self.send(200, {"ok": True, "version": "mock", "asr": "mock",
+                                   "models": ["small", "medium", "large-v3"], "default_model": "medium",
                                    "voices": ["af_heart", "af_bella", "am_michael", "bf_emma", "bm_george"]})
         if m := re.fullmatch(r"/dub/([^/]+)/audio/(\d+)", url.path):
-            job, seg_id = jobs.get(m[1]), int(m[2])
-            i = next((i for i, s in enumerate(SEGMENTS) if s["id"] == seg_id), None)
+            job, i = jobs.get(m[1]), int(m[2])
             if job is None or i not in job["done"]:
                 return self.send(404, {"detail": "clip not ready"})
-            return self.send(200, clip(i), "audio/wav")
+            return self.send(200, clip(m[1], i), "audio/wav")
         if m := re.fullmatch(r"/dub/([^/]+)", url.path):
             job = jobs.get(m[1])
             if job is None:
@@ -90,21 +91,22 @@ class Handler(BaseHTTPRequestHandler):
             now = time.monotonic()
             job["credit"] += SPEED * (now - job["t"])
             job["t"] = now
-            todo = [i for i in range(len(SEGMENTS)) if i not in job["done"]]
-            todo.sort(key=lambda i: (span(i)[1] <= at, span(i)[0]))  # playhead first
+            segs = job["segments"]
+            todo = [i for i in range(len(segs)) if i not in job["done"]]
+            todo.sort(key=lambda i: (span(job, i)[1] <= at, span(job, i)[0]))  # playhead first
             for i in todo:
-                cost = span(i)[1] - span(i)[0]
+                cost = span(job, i)[1] - span(job, i)[0]
                 if job["credit"] < cost:
                     break
                 job["credit"] -= cost
                 job["done"].add(i)
             done = sorted(job["done"])
-            status = "done" if len(done) == len(SEGMENTS) else "processing"
+            status = "done" if len(done) == len(segs) else "processing"
             return self.send(200, {
-                "status": status, "error": None, "duration": DURATION,
-                "progress": sum(span(i)[1] - span(i)[0] for i in done) / DURATION,
-                "segments": [dict(SEGMENTS[i], audio=True) for i in done],
-                "processed": merged(span(i) for i in done),
+                "status": status, "error": None, "duration": job["duration"],
+                "progress": sum(span(job, i)[1] - span(job, i)[0] for i in done) / job["duration"],
+                "segments": [dict(segs[i], id=i, audio=True) for i in done],
+                "processed": merged(span(job, i) for i in done),
             })
         self.send(404, {"detail": "not found"})
 
@@ -112,8 +114,17 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/dub":
             return self.send(404, {"detail": "not found"})
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        job = f"{body['video_id']}-{body['source_lang']}-{body['voice']}"
-        jobs.setdefault(job, {"done": set(), "credit": 0.0, "t": time.monotonic()})
+        transcript = body.get("transcript")
+        how = f"yt-{transcript['language']}" if transcript else f"{body['source_lang']}-{body.get('model')}"
+        job = f"{body['video_id']}-{how}-{body['voice']}"
+        print("POST /dub", job, "segments" if transcript else "cookies",
+              len(transcript["segments"] if transcript else body.get("cookies", [])), flush=True)
+        if transcript:
+            # The real companion merges caption fragments into sentences; keep them as sent.
+            segs, duration = sorted(transcript["segments"], key=lambda s: s["start"]), transcript["duration"]
+        else:
+            segs, duration = SEGMENTS, DURATION
+        jobs.setdefault(job, {"segments": segs, "duration": duration, "done": set(), "credit": 0.0, "t": time.monotonic()})
         self.send(200, {"job": job})
 
 

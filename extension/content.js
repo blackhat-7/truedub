@@ -18,6 +18,9 @@ const STAGES = {
   loading: 'Loading speech model…',
   detecting: 'Detecting language…',
 };
+const NO_CAPTIONS = 'No YouTube captions for this language — translating on your computer (slower)';
+const CAPTIONS_FAILED = 'Couldn’t get YouTube’s translation — translating on your computer (slower)';
+const NOTICE_MS = 5000;
 
 const log = (...args) => console.debug('[TrueDub]', ...args);
 
@@ -43,6 +46,8 @@ class Dub {
     this.player = player;
     this.video = player.querySelector('video');
     this.job = null;
+    this.transcript = false; // the companion voices YouTube's translation instead of running Whisper
+    this.noticeUntil = 0; // progress() leaves the pill alone until then
     this.status = null;
     this.segments = [];
     this.processed = null; // sorted [start, end] ranges the server has finished; null until known
@@ -62,12 +67,29 @@ class Dub {
   }
 
   async connect() {
-    setPill('Connecting…');
+    const fast = settings.engine === 'youtube';
+    let transcript = null;
+    if (fast) {
+      setPill('Getting YouTube’s translation…');
+      const reply = await youtubeTranscript(this.videoId, settings.sourceLang);
+      if (this.stopped) return;
+      transcript = reply.transcript;
+      if (!transcript) {
+        setPill(reply.failed ? CAPTIONS_FAILED : NO_CAPTIONS);
+        this.noticeUntil = performance.now() + NOTICE_MS;
+      }
+    } else {
+      setPill('Connecting…');
+    }
+    this.transcript = !!transcript;
+    log('transcript', transcript && `${transcript.language}, ${transcript.segments.length} segments`);
     try {
       const { job } = await send('start', {
         videoId: this.videoId,
         sourceLang: settings.sourceLang,
+        model: fast ? 'auto' : settings.engine,
         voice: settings.voice,
+        transcript,
       });
       if (this.stopped) return;
       this.job = job;
@@ -98,11 +120,17 @@ class Dub {
   }
 
   report({ status, progress }) {
+    const work = this.transcript ? 'Dubbing' : 'Translating';
     if (this.buffering) this.status = status; // tick() owns the pill while buffering
-    else if (STAGES[status]) setPill(STAGES[status]);
-    else if (status === 'processing') setPill(`Translating… ${Math.round(progress * 100)}%`);
+    else if (STAGES[status]) this.progress(STAGES[status]);
+    else if (status === 'processing') this.progress(`${work}… ${Math.round(progress * 100)}%`);
     else if (status === 'done' && this.status !== 'done') setPill('English dub ready', 'ok', 3000);
     this.status = status;
+  }
+
+  // Shows progress on the pill, unless a notice is still being shown.
+  progress(text) {
+    if (performance.now() >= this.noticeUntil) setPill(text);
   }
 
   fail(err) {
@@ -229,7 +257,7 @@ class Dub {
         // The user pressed play: let it play.
         this.buffering = false;
         this.override = true;
-        setPill('');
+        this.progress('');
       } else if (ahead >= Math.min(BUFFER_AHEAD, this.duration - t - 1)) {
         this.resume();
       } else {
@@ -251,12 +279,12 @@ class Dub {
   }
 
   bufferingPill(ahead) {
-    setPill(STAGES[this.status] ?? `Dubbing ahead… ${Math.floor(ahead)} s ready`);
+    this.progress(STAGES[this.status] ?? `Dubbing ahead… ${Math.floor(ahead)} s ready`);
   }
 
   resume() {
     this.buffering = false;
-    setPill('');
+    this.progress('');
     this.video.play().catch(() => {});
     log('resumed at', this.video.currentTime.toFixed(2));
   }
@@ -290,6 +318,22 @@ class Dub {
       document.addEventListener('pointerdown', resume, { once: true, capture: true });
     });
   }
+}
+
+// Asks captions.js, in the page's world, for YouTube's English translation of the
+// captions in the spoken language. Resolves with { transcript, failed }: the transcript
+// (docs/API.md) is null when there are no such captions or getting them failed.
+function youtubeTranscript(videoId, sourceLang) {
+  const id = crypto.randomUUID();
+  return new Promise((resolve) => {
+    const onReply = (e) => {
+      if (e.source !== window || e.data?.truedub !== 'transcript-reply' || e.data.id !== id) return;
+      window.removeEventListener('message', onReply);
+      resolve(e.data);
+    };
+    window.addEventListener('message', onReply);
+    window.postMessage({ truedub: 'transcript', id, videoId, sourceLang }, location.origin);
+  });
 }
 
 function startDub() {
@@ -465,7 +509,7 @@ document.addEventListener(
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'sync') return;
   for (const [key, { newValue }] of Object.entries(changes)) settings[key] = newValue ?? DEFAULTS[key];
-  if (dub && (changes.voice || changes.sourceLang)) startDub(); // a new job for the new voice/language
+  if (dub && (changes.voice || changes.sourceLang || changes.engine)) startDub(); // a new job for the new settings
   if (changes.autoDub && settings.autoDub && !dub && ui?.button.isConnected) startDub();
 });
 

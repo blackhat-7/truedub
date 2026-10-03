@@ -105,3 +105,8 @@
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 }
+
+/* captions.js borrows YouTube's captions for a moment to read their translation. */
+.truedub-capturing .ytp-caption-window-container {
+  display: none;
+}
