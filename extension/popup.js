@@ -47,7 +47,7 @@ const $ = (id) => document.getElementById(id);
 function voiceLabel(id) {
   const [, accent, gender, name] = id.match(/^([a-z])([fm])_(.+)$/) || [];
   if (!name) return id;
-  const who = [{ a: 'American', b: 'British' }[accent], gender === 'f' ? 'female' : 'male'];
+  const who = [{ a: 'US', b: 'UK' }[accent], gender === 'f' ? 'female' : 'male'];
   return `${name[0].toUpperCase()}${name.slice(1)} · ${who.filter(Boolean).join(' ')}`;
 }
 
@@ -91,10 +91,11 @@ async function init() {
     $('setup').hidden = false;
     return;
   }
-  const { version, voices } = health.data;
+  const { version, asr, voices } = health.data;
   status.dataset.state = 'online';
   status.textContent = 'Companion ready';
-  status.title = `Version ${version}`;
+  $('model').textContent = `Speech model: ${asr} · companion ${version}`;
+  $('model').hidden = false;
   if (voices.length) {
     const voice = voices.includes(settings.voice) ? settings.voice : voices[0];
     fill($('voice'), voices.map((v) => [v, voiceLabel(v)]), voice);

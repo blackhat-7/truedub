@@ -9,6 +9,8 @@ const KEEP_BEHIND = 30; // cached clips outside [t - KEEP_BEHIND, t + KEEP_AHEAD
 const KEEP_AHEAD = 90;
 const MAX_DRIFT = 0.15; // seconds a clip may drift from the video before it is re-seeked
 const START_LEAD = 0.05; // seconds between play() and audible output; clips are started this early
+const BUFFER_AHEAD = 20; // seconds of processed timeline needed before a paused video resumes
+const MIN_AHEAD = 0.3; // the video pauses when less than this is processed ahead of the playhead
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 const log = (...args) => console.debug('[TrueDub]', ...args);
@@ -37,6 +39,11 @@ class Dub {
     this.job = null;
     this.status = null;
     this.segments = [];
+    this.processed = null; // sorted [start, end] ranges the server has finished; null until known
+    this.duration = Infinity;
+    this.buffering = false; // we paused the video to let the dub get ahead
+    this.pausedAt = 0;
+    this.override = false; // the user resumed during buffering; don't pause again until caught up
     this.clips = new Map(); // segment id -> { start, end, url }; url is null while loading
     this.current = null; // { id, start, audio }
     this.userVolume = this.video.volume; // the volume the user picked in YouTube
@@ -72,6 +79,8 @@ class Dub {
         if (this.stopped) return;
         if (r.status === 'error') throw new Error(r.error || 'the companion reported an error');
         this.segments = r.segments;
+        this.processed = r.processed ?? null;
+        this.duration = r.duration || Infinity;
         this.report(r);
       }
       this.prefetch();
@@ -83,7 +92,8 @@ class Dub {
   }
 
   report({ status, progress }) {
-    if (status === 'downloading') setPill('Downloading audio…');
+    if (this.buffering) this.status = status; // tick() owns the pill while buffering
+    else if (status === 'downloading') setPill('Downloading audio…');
     else if (status === 'processing') setPill(`Translating… ${Math.round(progress * 100)}%`);
     else if (status === 'done' && this.status !== 'done') setPill('English dub ready', 'ok', 3000);
     this.status = status;
@@ -105,6 +115,7 @@ class Dub {
 
   stop() {
     this.stopped = true;
+    if (this.buffering && currentVideoId() === this.videoId) this.video.play().catch(() => {});
     clearInterval(this.ticker);
     clearTimeout(this.pollTimer);
     this.stopClip();
@@ -156,6 +167,7 @@ class Dub {
     const ad = this.player.classList.contains('ad-showing');
     if (!ad) this.at = v.currentTime;
     this.duck(!ad && this.segments.length > 0);
+    if (!ad) this.buffer();
 
     const t = v.currentTime;
     const seg = ad ? undefined : this.segments.findLast((s) => s.start - START_LEAD <= t);
@@ -186,6 +198,57 @@ class Dub {
     } else if (Math.abs(a.currentTime - offset) > MAX_DRIFT) {
       a.currentTime = offset;
     }
+  }
+
+  // Seconds of processed timeline from the playhead onwards.
+  ahead(t) {
+    const range = this.processed.find(([start, end]) => start <= t && t < end);
+    return range ? range[1] - t : 0;
+  }
+
+  // Pause the video while the playhead is in a part the server hasn't processed yet,
+  // and resume once enough is ready. Silence gaps count as processed, so they never pause.
+  buffer() {
+    const v = this.video;
+    if (!this.processed || this.status === 'done') {
+      if (this.buffering) this.resume();
+      return;
+    }
+    const t = v.currentTime;
+    const ahead = this.ahead(t);
+    if (this.buffering) {
+      if (!v.paused && performance.now() - this.pausedAt < 1000) {
+        v.pause(); // YouTube itself resumed right after our pause (it does so around seeks)
+      } else if (!v.paused) {
+        // The user pressed play: let it play.
+        this.buffering = false;
+        this.override = true;
+        setPill('');
+      } else if (ahead >= Math.min(BUFFER_AHEAD, this.duration - t - 1)) {
+        this.resume();
+      } else {
+        setPill(`Dubbing ahead… ${Math.floor(ahead)} s ready`);
+      }
+      return;
+    }
+    if (this.override) {
+      if (ahead > MIN_AHEAD) this.override = false; // caught up; later gaps pause again
+      return;
+    }
+    if (!v.paused && !v.seeking && ahead < MIN_AHEAD) {
+      this.buffering = true;
+      this.pausedAt = performance.now();
+      v.pause();
+      log('buffering at', t.toFixed(2));
+      setPill(`Dubbing ahead… ${Math.floor(ahead)} s ready`);
+    }
+  }
+
+  resume() {
+    this.buffering = false;
+    setPill('');
+    this.video.play().catch(() => {});
+    log('resumed at', this.video.currentTime.toFixed(2));
   }
 
   startClip(seg) {
