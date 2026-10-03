@@ -1,0 +1,34 @@
+[project]
+name = "truedub"
+version = "0.1.0"
+description = "Local companion server for the TrueDub Chrome extension"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "yt-dlp[default]",
+    "deno",
+    "av",
+    "psutil",
+    "kokoro-onnx",
+    "soundfile",
+    "numpy",
+    "mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "faster-whisper; sys_platform != 'darwin' or platform_machine != 'arm64'",
+]
+
+[project.scripts]
+truedub = "truedub.app:main"
+
+[build-system]
+requires = ["uv_build>=0.9,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[tool.ruff]
+line-length = 100

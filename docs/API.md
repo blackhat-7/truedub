@@ -8,8 +8,10 @@ All times are seconds on the original video's timeline.
 ## `GET /health`
 
 ```json
-{ "ok": true, "version": "0.1.0", "asr": "mlx-whisper", "voices": ["af_heart", "am_michael", "..."] }
+{ "ok": true, "version": "0.1.0", "asr": "mlx-whisper large-v3 (mlx)", "voices": ["af_heart", "am_michael", "..."] }
 ```
+
+`asr` names the backend, Whisper model and device. It is informational.
 
 ## `POST /dub`
 
@@ -40,12 +42,17 @@ the video at or after the playhead first, so seeking reprioritises work.
   "error": null,
   "duration": 812.4,
   "progress": 0.37,
+  "processed": [[0.0, 61.4], [298.2, 340.0]],
   "segments": [
     { "id": 0, "start": 3.2, "end": 7.9, "text": "So today we will build a REST API.", "audio": true }
   ]
 }
 ```
 
+- `duration` is `null` until the audio is downloaded.
+- `processed` lists the sorted, merged time ranges that are fully done (ASR and
+  TTS, silent parts included). When the playhead reaches a time outside these
+  ranges, the dub there is not ready yet.
 - `segments` is sorted by `start` and only contains finished segments.
 - `audio: true` means the clip is ready at the audio endpoint.
 - A clip never runs past the next segment's `start`. The server speeds up
