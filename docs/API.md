@@ -19,12 +19,13 @@ job, and finished work is served from the on-disk cache.
 Request:
 
 ```json
-{ "video_id": "dQw4w9WgXcQ", "source_lang": "hi", "voice": "am_michael" }
+{ "video_id": "dQw4w9WgXcQ", "source_lang": "auto", "voice": "am_michael" }
 ```
 
-`source_lang` is a Whisper language code, or `"auto"`. Auto never picks English:
-the user only dubs videos they cannot understand, and "detected English" is
-exactly the bug YouTube has with Hinglish.
+`source_lang` is a Whisper language code, or `"auto"`. Auto detects the language
+from the audio itself and never picks the target language (English): the user
+only presses Dub on speech they cannot understand. Mixed speech such as Hinglish
+often scores as English, which is exactly the bug YouTube's auto-dub has.
 
 Response: `{ "job": "<job id>" }`
 
