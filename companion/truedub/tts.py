@@ -6,10 +6,12 @@ from pathlib import Path
 import numpy as np
 
 SR = 24000
-MAX_SPEED = 1.6
 MODELS = Path.home() / ".cache" / "truedub" / "models"
 MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
 FILES = ("kokoro-v1.0.onnx", "voices-v1.0.bin")
+# Kokoro's default pace is slower than most YouTubers talk; a steady, slightly brisker pace
+# sounds more natural than speeding up single lines to keep up.
+PACE = 1.1
 
 _kokoro = None
 
@@ -37,15 +39,8 @@ def synthesize(text: str, voice: str, speed: float = 1.0) -> np.ndarray:
         from kokoro_onnx import Kokoro
 
         _kokoro = Kokoro(str(MODELS / FILES[0]), str(MODELS / FILES[1]))
-    audio, _ = _kokoro.create(text, voice=voice, speed=speed)
+    audio, _ = _kokoro.create(text, voice=voice, speed=speed * PACE)
     return audio
-
-
-def next_speed(speed: float, duration: float, slot: float) -> float:
-    """Kokoro speed that should make a clip of `duration` (made at `speed`) fit `slot`."""
-    if duration <= slot:
-        return speed
-    return min(speed * duration / slot * 1.05, MAX_SPEED)
 
 
 def trim_silence(audio: np.ndarray, threshold: float = 0.01) -> np.ndarray:
@@ -55,31 +50,29 @@ def trim_silence(audio: np.ndarray, threshold: float = 0.01) -> np.ndarray:
     return audio[loud[0] : loud[-1] + 1]
 
 
-def fit_clip(audio: np.ndarray, slot: float, fade: float = 0.05) -> np.ndarray:
-    """Trim silence, then truncate with a short fade-out if the clip still overruns `slot`."""
+def speak(text: str, voice: str, speed: float = 1.0) -> np.ndarray | None:
+    """Speech for `text`, silence trimmed, or None if nothing is speakable."""
+    try:
+        audio = synthesize(text, voice, speed)
+    except ValueError:  # text with no speakable phonemes
+        return None
     audio = trim_silence(audio)
+    return audio if audio.size else None
+
+
+def fit_clip(audio: np.ndarray, slot: float, fade: float = 0.05) -> np.ndarray:
+    """Cut a clip that overruns `slot`: at its last pause in the second half of the slot, so no
+    word is cut off, else with a short fade-out."""
     limit = max(int(slot * SR), 0)
     if len(audio) <= limit:
         return audio
+    frame = SR // 50
+    n = limit // frame
+    rms = np.sqrt(np.mean(audio[: n * frame].reshape(n, frame) ** 2, axis=1))
+    quiet = np.flatnonzero(rms[n // 2 :] < 0.01)
+    if quiet.size:
+        return trim_silence(audio[: (n // 2 + quiet[-1]) * frame])
     audio = audio[:limit].copy()
-    n = min(int(fade * SR), limit)
-    audio[limit - n :] *= np.linspace(1.0, 0.0, n, dtype=audio.dtype)
+    k = min(int(fade * SR), limit)
+    audio[limit - k :] *= np.linspace(1.0, 0.0, k, dtype=audio.dtype)
     return audio
-
-
-def dub(text: str, voice: str, slot: float) -> np.ndarray | None:
-    """Speech for `text` that ends within `slot` seconds, or None if nothing is speakable."""
-    speed = 1.0
-    try:
-        audio = synthesize(text, voice)
-        # Speed does not scale duration linearly, so retry until it fits or hits the cap.
-        for _ in range(3):
-            faster = next_speed(speed, len(trim_silence(audio)) / SR, slot)
-            if faster == speed:
-                break
-            speed = faster
-            audio = synthesize(text, voice, speed)
-    except ValueError:  # text with no speakable phonemes
-        return None
-    audio = fit_clip(audio, slot)
-    return audio if audio.size else None

@@ -1,8 +1,9 @@
 # TrueDub companion
 
-Local server for the TrueDub extension. It downloads a video's audio, detects
-the spoken language, translates the speech to English with Whisper and voices
-it with Kokoro. It listens on `http://127.0.0.1:7861` only. The API is in
+Local server for the TrueDub extension. When YouTube has captions in the spoken
+language, the extension sends their English translation and the companion only
+voices it with Kokoro: no download, no Whisper. Otherwise it downloads the
+audio, detects the spoken language and translates the speech with Whisper. It listens on `http://127.0.0.1:7861` only. The API is in
 [../docs/API.md](../docs/API.md).
 
 ## Install and run
@@ -37,9 +38,11 @@ The default depends on the machine:
 | NVIDIA GPU (CUDA) | faster-whisper, float16 | `large-v3` |
 | CPU only | faster-whisper, int8 | `medium` |
 
-Override with `uv run truedub --model small` or `TRUEDUB_MODEL=small`. Choices:
-`tiny`, `base`, `small`, `medium`, `large-v2`, `large-v3`. Turbo is not
-offered: it was not trained to translate. `/health` reports the active model.
+Override the default with `uv run truedub --model small` or
+`TRUEDUB_MODEL=small`. Choices: `tiny`, `base`, `small`, `medium`, `large-v2`,
+`large-v3`. Turbo is not offered: it was not trained to translate. A request may
+also pick `small`, `medium` or `large-v3` (`/health` lists them). Only one model
+is kept in memory; switching unloads the previous one.
 
 On a slow CPU, `small` keeps up with playback better than `medium`, at a clear
 cost in translation quality. When the dub is not ready, the extension pauses the
@@ -51,6 +54,9 @@ video until it is.
   startup into `~/.cache/truedub/models`.
 - The Whisper model downloads into the Hugging Face cache on the first dub
   (`large-v3` about 3 GB, `medium` about 1.5 GB), so the first job waits for it.
+
+Clips play one after another like a real dub: natural speed, at most a mild
+speed-up, and a clip may start up to 1.5 s late and catch up in pauses.
 
 Dubs are cached in `~/.cache/truedub/<video_id>/`, so revisits are instant and
 survive restarts. A new voice reuses the cached translation. Delete the folder

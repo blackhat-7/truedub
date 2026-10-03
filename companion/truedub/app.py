@@ -8,8 +8,9 @@ import sys
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, Field, model_validator
 
 from . import __version__, asr, pipeline, tts
 
@@ -25,11 +26,39 @@ class Cookie(BaseModel):
     expires: float = 0  # Unix time; 0 for a session cookie
 
 
+class Caption(BaseModel):
+    start: float = Field(ge=0, allow_inf_nan=False)
+    end: float = Field(ge=0, allow_inf_nan=False)
+    text: str = Field(max_length=1000)
+
+
+class Transcript(BaseModel):
+    language: str = Field("", max_length=32)  # informational
+    duration: float = Field(gt=0, le=24 * 3600, allow_inf_nan=False)
+    segments: list[Caption] = Field(min_length=1, max_length=50_000)
+
+    @model_validator(mode="after")
+    def check(self):
+        if any(c.end < c.start for c in self.segments):
+            raise ValueError("a segment ends before it starts")
+        if not any(c.text.strip() for c in self.segments):
+            raise ValueError("the transcript has no text")
+        return self
+
+
 class DubRequest(BaseModel):
     video_id: str
     source_lang: str = "auto"
+    model: str = "auto"
     voice: str = "am_michael"
+    transcript: Transcript | None = None
     cookies: list[Cookie] = []
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_request(request, exc: RequestValidationError):
+    detail = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors()[:3])
+    return JSONResponse({"detail": detail}, status_code=400)
 
 
 @app.get("/health")
@@ -37,7 +66,9 @@ def health():
     return {
         "ok": True,
         "version": __version__,
-        "asr": f"{asr.NAME} {asr.model} ({asr.DEVICE})",
+        "asr": f"{asr.NAME} {asr.default_model} ({asr.DEVICE})",
+        "models": asr.OFFERED,
+        "default_model": asr.default_model,
         "voices": tts.voices(),
     }
 
@@ -46,13 +77,19 @@ def health():
 def dub(request: DubRequest):
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", request.video_id):
         raise HTTPException(400, f"Invalid video_id {request.video_id!r}")
-    if request.source_lang != "auto" and request.source_lang not in asr.LANGUAGES:
-        raise HTTPException(400, f"Unknown source_lang {request.source_lang!r}")
     if request.voice not in tts.voices():
         raise HTTPException(400, f"Unknown voice {request.voice!r}")
+    if request.transcript:
+        job = pipeline.Job(request.video_id, request.voice, transcript=True)
+        return {"job": pipeline.submit(job, request.transcript.model_dump()).id}
+    if request.source_lang != "auto" and request.source_lang not in asr.LANGUAGES:
+        raise HTTPException(400, f"Unknown source_lang {request.source_lang!r}")
+    model = asr.default_model if request.model == "auto" else request.model
+    if model not in asr.MODELS:
+        raise HTTPException(400, f"Unknown model {request.model!r}")
     cookies = [c.model_dump() for c in request.cookies]
-    job = pipeline.submit(request.video_id, request.source_lang, request.voice, cookies)
-    return {"job": job.id}
+    job = pipeline.Job(request.video_id, request.voice, request.source_lang, model, cookies=cookies)
+    return {"job": pipeline.submit(job).id}
 
 
 @app.get("/dub/{job_id}")
@@ -76,13 +113,13 @@ def main() -> None:
     parser.add_argument(
         "--model",
         choices=asr.MODELS,
-        default=os.environ.get("TRUEDUB_MODEL", asr.model),
-        help=f"Whisper model (env TRUEDUB_MODEL; default for this machine: {asr.model})",
+        default=os.environ.get("TRUEDUB_MODEL", asr.default_model),
+        help=f"Whisper model (env TRUEDUB_MODEL; default for this machine: {asr.default_model})",
     )
     model = parser.parse_args().model
     if model not in asr.MODELS:  # argparse does not check defaults taken from the env
         parser.error(f"TRUEDUB_MODEL must be one of {', '.join(asr.MODELS)}")
-    asr.model = model
+    asr.default_model = model
     if sys.stderr is None:  # pythonw (Windows autostart) has no console: log to a file
         pipeline.CACHE.mkdir(parents=True, exist_ok=True)
         log = open(pipeline.CACHE / "truedub.log", "a", buffering=1, encoding="utf-8")  # noqa: SIM115

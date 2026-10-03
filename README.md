@@ -43,13 +43,14 @@ and keep it running while you watch. Load the extension as in step 3.
 
 ### What to expect on a laptop without a GPU
 
-- The first run downloads about 2 GB of models: the 350 MB voice when the
-  companion starts and Whisper `medium` (1.5 GB) on the first dub. That first
-  dub waits for the download.
-- On a CPU-only laptop the `medium` model runs at about half of realtime. The
-  extension pauses the video and shows "Dubbing ahead…" until enough is ready,
-  then plays. Pausing the video for a minute lets it get further ahead.
-- For more speed and less accuracy, use the `small` model. Run
-  `setx TRUEDUB_MODEL small` (Windows), then sign out and back in. On macOS or
-  Linux run `uv run truedub --model small`.
+- **Fast mode (default):** TrueDub voices YouTube's own English translation of
+  the video's captions. The dub starts within seconds and keeps up with
+  playback. The first run downloads the 350 MB voice model.
+- **On this computer (small / medium / large-v3):** pick it in the popup under
+  Translation. Whisper translates the audio locally: often more accurate, but
+  on a CPU-only laptop `medium` runs at about half of realtime, so the video
+  pauses with "Dubbing ahead…" to wait. The model downloads on first use
+  (about 1.5 GB for medium).
+- TrueDub switches to local Whisper by itself when YouTube has no captions in
+  the language actually spoken, e.g. a Hindi video tagged as English.
 - Finished dubs are cached, so watching a video again is instant.

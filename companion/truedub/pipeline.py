@@ -3,13 +3,18 @@
 Work happens in chunks of the timeline cut at pauses. The first chunk after a seek is short
 so audio starts quickly; chunks that continue the previous one are longer.
 
+A transcript job voices YouTube's English captions instead: no download and no Whisper.
+Its chunks are cut at sentence starts.
+
 Cache layout under ~/.cache/truedub/<video_id>/:
     audio.wav                                   16 kHz mono source audio
     context.txt                                 title and description line, prompted to Whisper
     language.txt                                language detected for source_lang "auto"
     <model>/<lang>/asr/<start>_<end>.json       cleaned English segments, shared by voices
-    <model>/<lang>/<voice>/<start>_<end>.json   finished segments of a chunk
-    <model>/<lang>/<voice>/<id>.wav             dubbed clips
+    <model>/<lang>/<voice>-v2/<start>_<end>.json  finished segments of a chunk
+    <model>/<lang>/<voice>-v2/<id>.wav          dubbed clips
+    youtube/transcript.json                     sentences built from the first transcript sent
+    youtube/<voice>-v2/...                      as above, for the transcript
 """
 
 import io
@@ -39,6 +44,14 @@ FPS = 50  # energy frames per second
 TARGET = "en"
 SHORT = 15.0  # first chunk after a seek, for a fast start
 LONG = 45.0  # chunks continuing the previous one, for context and throughput
+TEXT_LONG = 30.0  # LONG for a transcript, which needs no context
+CLIPS = "v4"  # version of the dubbed clips: bump to remake cached ones
+# Clips play one after another and may start late, like real dubbing, instead of being
+# rushed into their segment's slot.
+GAP = 0.15  # seconds between clips
+MAX_LAG = 3.0  # how late a clip may start
+MILD = 1.15  # speed-up used freely to stay on time
+MAX_SPEED = 1.35  # speed-up allowed only to keep within MAX_LAG; still better than cutting words
 # Whisper copies the prompt's style: a punctuated prompt gives punctuated sentences,
 # which Kokoro voices with natural pauses.
 PROMPT = "Okay, let's continue."
@@ -108,6 +121,48 @@ def next_chunk(
     if end - start <= size:
         return start, end
     return start, quietest(db, start + size * 2 / 3, start + size)
+
+
+def next_text_chunk(
+    starts: list[float], duration: float, done: list[Range], at: float, prev_end: float
+) -> Range | None:
+    """next_chunk for a transcript: chunks cut at sentence `starts`, so none is split."""
+    gaps = holes(done, duration)
+    if not gaps:
+        return None
+    ahead = [g for g in gaps if g[1] > at]
+    start, end = ahead[0] if ahead else gaps[0]
+    cuts = [t for t in starts if start < t < end]
+    if ahead and any(t <= at for t in cuts):  # playhead inside a hole: start at its sentence
+        start = max(t for t in cuts if t <= at)
+    size = TEXT_LONG if abs(start - prev_end) < 1e-6 else SHORT
+    later = [t for t in cuts if t > start]
+    if end - start <= size or not later:
+        return start, end
+    return start, max([t for t in later if t <= start + size], default=later[0])
+
+
+def place(
+    start: float, free: float, length: float, next_start: float | None, end: float
+) -> tuple[float, float, float]:
+    """Start, speed-up and latest end for a clip `length` seconds long of a segment at `start`.
+
+    The clip starts at `start`, or at `free` (GAP after the previous clip) if later. It speeds
+    up to MILD to end in time for the next segment, and up to MAX_SPEED so the next clip starts
+    at most MAX_LAG late, and the last clip ends by `end`.
+    """
+    start = round(max(start, free), 2)
+    if next_start is None:
+        on_time = latest = end
+    else:
+        on_time = next_start - GAP
+        latest = min(next_start + MAX_LAG, end) - GAP
+    speed = max(
+        1.0,
+        min(MILD, length / max(on_time - start, 1e-3)),
+        length / max(latest - start, 1e-3),
+    )
+    return start, round(min(speed, MAX_SPEED), 3), latest
 
 
 def pick_language(probs: list[dict[str, float]]) -> str:
@@ -189,6 +244,74 @@ def split_long(seg: dict, max_s: float = 12) -> list[dict]:
     return out
 
 
+SENTENCE_END = re.compile(r"[.!?][\"'”’)]*$")
+NOT_SPOKEN = re.compile(r"\[[^\]]*\]|[♪♫\u200b]")  # tags like [Music], notes, zero-width spaces
+
+
+def build_sentences(
+    captions: list[dict],
+    duration: float,
+    max_gap: float = 0.7,
+    max_s: float = 12,
+    max_chars: int = 200,
+) -> list[dict]:
+    """Sentences from YouTube caption events, which are overlapping fragments of sentences.
+
+    A fragment ends where the next one starts, if sooner, and its time is shared among its
+    words by length. A sentence ends at sentence punctuation or a pause over `max_gap`, or
+    before it would pass `max_s` or `max_chars`, after a comma in its second half if any.
+    Then tiny sentences ("Ok?") join a neighbour, as Whisper's do.
+    """
+    events = sorted(
+        (c for c in captions if c["text"].strip() and c["start"] < duration),
+        key=lambda c: c["start"],
+    )
+    words = []  # (start, end, word)
+    for i, c in enumerate(events):
+        start, end = c["start"], min(c["end"], duration)
+        if i + 1 < len(events):
+            end = min(end, events[i + 1]["start"])
+        text = NOT_SPOKEN.sub("", c["text"]).split()
+        if not text:
+            continue
+        total, done = sum(len(w) + 1 for w in text), 0
+        for w in text:
+            a = start + (end - start) * done / total
+            done += len(w) + 1
+            words.append((a, start + (end - start) * done / total, w))
+
+    sentences, current = [], []
+    for word in words:
+        if current and word[0] - current[-1][1] > max_gap:
+            sentences.append(current)
+            current = []
+        elif current and (
+            word[1] - current[0][0] > max_s
+            or sum(len(w) + 1 for _, _, w in current) + len(word[2]) > max_chars
+        ):
+            half = len(current) // 2
+            commas = [i for i, w in enumerate(current) if i >= half and w[2].endswith(",")]
+            cut = commas[-1] + 1 if commas else len(current)
+            sentences.append(current[:cut])
+            current = current[cut:]
+        current.append(word)
+        if SENTENCE_END.search(word[2]):
+            sentences.append(current)
+            current = []
+    if current:
+        sentences.append(current)
+    return merge_segments(
+        [
+            {
+                "start": round(s[0][0], 2),
+                "end": round(s[-1][1], 2),
+                "text": re.sub(r" (?=[.,!?])", "", " ".join(w for *_, w in s)),
+            }
+            for s in sentences
+        ]
+    )
+
+
 def video_context(info: dict) -> str:
     """The title and first description line: names and terms for Whisper to spell right."""
     title = info.get("title") or ""
@@ -226,8 +349,10 @@ def _chunk_files(folder: Path) -> dict[Range, Path]:
 @dataclass
 class Job:
     video_id: str
-    source_lang: str
     voice: str
+    source_lang: str = "auto"
+    model: str = ""  # Whisper model; unused by a transcript job
+    transcript: bool = False  # voices YouTube's English captions instead of Whisper's
     # The browser's YouTube cookies, for a download that hits the bot check. Never written to disk.
     cookies: list[dict] = field(default_factory=list, repr=False)
     status: str = "downloading"
@@ -235,6 +360,7 @@ class Job:
     duration: float | None = None
     db: np.ndarray | None = None  # loudness per frame, see frame_db
     language: str | None = None  # resolved Whisper language
+    sentences: list[dict] = field(default_factory=list)  # a transcript job's English text
     chunks: dict[Range, list[dict]] = field(default_factory=dict)  # finished segments
     at: float = 0.0
     prev_end: float = -1.0  # end of the last chunk processed
@@ -242,7 +368,9 @@ class Job:
 
     @property
     def id(self) -> str:
-        return f"{self.video_id}.{self.source_lang}.{self.voice}"
+        if self.transcript:
+            return f"{self.video_id}.yt.{self.voice}"
+        return f"{self.video_id}.{self.source_lang}.{self.model}.{self.voice}"
 
     @property
     def dir(self) -> Path:
@@ -250,11 +378,13 @@ class Job:
 
     @property
     def asr_dir(self) -> Path:
-        return self.dir / asr.model / self.language / "asr"
+        return self.dir / self.model / self.language / "asr"
 
     @property
     def voice_dir(self) -> Path:
-        return self.dir / asr.model / self.language / self.voice
+        if self.transcript:
+            return self.dir / "youtube" / f"{self.voice}-{CLIPS}"
+        return self.dir / self.model / self.language / f"{self.voice}-{CLIPS}"
 
     def processed(self) -> list[Range]:
         return merge_ranges(self.chunks)
@@ -267,10 +397,11 @@ class Job:
     def state(self) -> dict:
         processed = self.processed()
         status = self.status
-        if status == "processing" and not asr.loaded():
-            status = "loading"
-        elif status == "processing" and self.language is None:
-            status = "detecting"
+        if status == "processing" and not self.transcript:
+            if not asr.loaded(self.model):
+                status = "loading"
+            elif self.language is None:
+                status = "detecting"
         return {
             "status": status,
             "error": self.error,
@@ -289,17 +420,23 @@ jobs: dict[str, Job] = {}
 lock = threading.Condition()
 
 
-def submit(video_id: str, source_lang: str, voice: str, cookies: list[dict]) -> Job:
-    """Get or start the job for these inputs. A failed job is retried."""
-    job = Job(video_id, source_lang, voice, cookies)
+def submit(job: Job, transcript: dict | None = None) -> Job:
+    """Get or start `job`. A failed job is retried.
+
+    `transcript` ({duration, segments}) is required for a transcript job.
+    """
     with lock:
         existing = jobs.get(job.id)
         if existing and existing.status != "error":
             existing.polled = time.monotonic()
             lock.notify()
             return existing
+        if job.transcript:  # nothing to download: ready to work now
+            _load_transcript(job, transcript)
         jobs[job.id] = job
-    threading.Thread(target=_prepare, args=(job,), daemon=True).start()
+        lock.notify()
+    if not job.transcript:
+        threading.Thread(target=_prepare, args=(job,), daemon=True).start()
     return job
 
 
@@ -426,6 +563,17 @@ def _prepare(job: Job) -> None:
             job.status, job.error = "error", _message(e)
 
 
+def _load_transcript(job: Job, transcript: dict) -> None:
+    """The sentences built from the first transcript sent: cached clips were timed by them."""
+    path = job.dir / "youtube" / "transcript.json"
+    if not path.exists():
+        sentences = build_sentences(transcript["segments"], transcript["duration"])
+        _write_json(path, {"duration": transcript["duration"], "sentences": sentences})
+    saved = json.loads(path.read_text())
+    job.duration, job.sentences = saved["duration"], saved["sentences"]
+    job.load_cache()
+
+
 def _detect_language(job: Job) -> str:
     """Sum language probabilities over three 30 s samples spread across the video.
 
@@ -434,7 +582,7 @@ def _detect_language(job: Job) -> str:
     """
     t = time.monotonic()
     starts = [job.duration * (k + 0.5) / 3 for k in range(3)]
-    probs = [asr.language_probs(_read(job, s, s + 30)) for s in starts]
+    probs = [asr.language_probs(job.model, _read(job, s, s + 30)) for s in starts]
     language = pick_language(probs)
     (job.dir / "language.txt").write_text(language)
     log.info("%s: detected language %s in %.1fs", job.video_id, language, time.monotonic() - t)
@@ -460,7 +608,7 @@ def _translate(job: Job, chunk: Range) -> list[dict]:
     if context.exists():
         prompt = f"{context.read_text(encoding='utf-8')} {prompt}"
     kept = []
-    for seg in asr.translate(audio, job.language, prompt):
+    for seg in asr.translate(job.model, audio, job.language, prompt):
         a, b = seg["start"], min(seg["end"], end - start)
         peak = db[int(a * FPS) : int(b * FPS) + 1].max(initial=-100.0)
         if b > a and not is_junk(seg, peak):
@@ -477,17 +625,37 @@ def _translate(job: Job, chunk: Range) -> list[dict]:
 
 
 def _process(job: Job, chunk: Range) -> list[dict]:
-    segs = _translate(job, chunk)
+    if job.transcript:
+        segs = [s for s in job.sentences if chunk[0] <= s["start"] < chunk[1]]
+    else:
+        segs = _translate(job, chunk)
     job.voice_dir.mkdir(parents=True, exist_ok=True)
+    # Speech may run on past the chunk: continue after the previous chunk's last clip, and
+    # end before the next chunk's first clip (or within MAX_LAG if it isn't done yet).
+    with lock:
+        before = [ss for (a, b), ss in job.chunks.items() if abs(b - chunk[0]) < 1e-6 and ss]
+        after = [ss for (a, b), ss in job.chunks.items() if abs(a - chunk[1]) < 1e-6 and ss]
+    free = before[0][-1]["end"] + GAP if before else -math.inf
+    limit = after[0][0]["start"] if after else chunk[1] + MAX_LAG
     out = []
     for i, seg in enumerate(segs):
-        limit = segs[i + 1]["start"] if i + 1 < len(segs) else chunk[1]
-        clip = tts.dub(seg["text"], job.voice, limit - seg["start"])
+        clip = tts.speak(seg["text"], job.voice)
         if clip is None:
             continue
-        seg_id = round(seg["start"] * 1000)
+        next_start = segs[i + 1]["start"] if i + 1 < len(segs) else None
+        start, speed, latest = place(seg["start"], free, len(clip) / tts.SR, next_start, limit)
+        if speed > 1:
+            clip = tts.speak(seg["text"], job.voice, speed)
+        if clip is None:
+            continue
+        clip = tts.fit_clip(clip, latest - start)  # the last resort
+        if not clip.size:
+            continue
+        seg_id = round(start * 1000)
         sf.write(job.voice_dir / f"{seg_id}.wav", clip, tts.SR)
-        out.append({"id": seg_id, **seg, "audio": True})
+        end = round(start + len(clip) / tts.SR, 2)
+        out.append({"id": seg_id, "start": start, "end": end, "text": seg["text"], "audio": True})
+        free = end + GAP
     _write_json(job.voice_dir / f"{_chunk_name(chunk)}.json", out)
     return out
 
@@ -500,7 +668,14 @@ def _pick() -> tuple[Job, Range | None] | None:
     for job in sorted(jobs.values(), key=lambda j: j.polled, reverse=True):
         if time.monotonic() - job.polled > IDLE:
             continue
-        if job.status == "downloading" and not asr.loaded():
+        if job.transcript:
+            if job.status == "processing":
+                starts = [s["start"] for s in job.sentences]
+                chunk = next_text_chunk(starts, job.duration, job.processed(), job.at, job.prev_end)
+                if chunk:
+                    return job, chunk
+            continue
+        if job.status == "downloading" and not asr.loaded(job.model):
             return job, None
         if job.status != "processing":
             continue
@@ -521,7 +696,7 @@ def _work() -> None:
         job, chunk = picked
         try:
             if chunk is None:
-                asr.load()
+                asr.load(job.model)
                 with lock:
                     detect = job.status == "processing" and job.language is None
                 if detect:

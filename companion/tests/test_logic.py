@@ -1,12 +1,21 @@
 import io
+import math
+from itertools import pairwise
 
 import numpy as np
 import pytest
+from pydantic import ValidationError
 from yt_dlp.cookies import YoutubeDLCookieJar
 
 from truedub import tts
+from truedub.app import Transcript
 from truedub.pipeline import (
+    GAP,
+    MAX_LAG,
+    MAX_SPEED,
+    MILD,
     SR,
+    build_sentences,
     frame_db,
     holes,
     is_junk,
@@ -14,7 +23,9 @@ from truedub.pipeline import (
     merge_segments,
     netscape_cookies,
     next_chunk,
+    next_text_chunk,
     pick_language,
+    place,
     quietest,
     split_long,
     video_context,
@@ -167,25 +178,175 @@ def test_split_long_keeps_short_or_single_sentence():
     assert split_long(seg(0, 30, "one endless sentence")) == [seg(0, 30, "one endless sentence")]
 
 
-def test_next_speed():
-    assert tts.next_speed(1.0, 2.0, 3.0) == 1.0
-    assert tts.next_speed(1.0, 3.0, 2.5) == pytest.approx(1.26)
-    assert tts.next_speed(1.2, 3.0, 2.5) == pytest.approx(1.512)
-    assert tts.next_speed(1.0, 10.0, 2.0) == tts.MAX_SPEED
-    assert tts.next_speed(tts.MAX_SPEED, 10.0, 2.0) == tts.MAX_SPEED
-
-
-def test_fit_clip_trims_silence():
+def test_speak_trims_silence(monkeypatch):
     tone = np.full(tts.SR, 0.5, dtype=np.float32)
     padded = np.concatenate([np.zeros(tts.SR // 2, np.float32), tone, np.zeros(tts.SR, np.float32)])
-    assert len(tts.fit_clip(padded, slot=5)) == tts.SR
+    monkeypatch.setattr(tts, "synthesize", lambda text, voice, speed=1.0: padded)
+    assert len(tts.speak("Hi.", "am_michael")) == tts.SR
 
 
-def test_fit_clip_truncates_with_fade():
+def test_fit_clip_keeps_clip_that_fits():
+    clip = np.full(tts.SR, 0.5, dtype=np.float32)
+    assert len(tts.fit_clip(clip, slot=2)) == tts.SR
+
+
+def test_fit_clip_cuts_at_last_pause():
+    word = np.full(tts.SR // 2, 0.5, dtype=np.float32)
+    pause = np.zeros(tts.SR // 5, dtype=np.float32)
+    clip = tts.fit_clip(np.concatenate([word, pause, word, pause, word]), slot=1.6)
+    assert len(clip) == int(1.2 * tts.SR)  # the first two words, not part of the third
+
+
+def test_fit_clip_truncates_with_fade_without_pause():
     clip = tts.fit_clip(np.full(3 * tts.SR, 0.5, dtype=np.float32), slot=2)
     assert len(clip) == 2 * tts.SR
     assert clip[-1] == pytest.approx(0)
     assert clip[0] == pytest.approx(0.5)
+
+
+# The start of I7_eVcsOXik's English captions as YouTube sends them: fragments whose times
+# overlap the next one, blank events, and two sentences in one fragment.
+CAPTIONS = [
+    seg(0.0, 3.84, "Hello everyone, in this video I am going to"),
+    seg(2.07, 3.84, "\n"),
+    seg(2.08, 6.319, "tell you about a project"),
+    seg(3.83, 6.319, "\n"),
+    seg(3.84, 8.16, "which is Docine."),
+    seg(6.309, 8.16, "\n"),
+    seg(6.319, 11.04, "We are also using this Docine project practically"),
+    seg(8.15, 11.04, "\n"),
+    seg(8.16, 13.12, "for internal work and"),
+    seg(11.03, 13.12, "\n"),
+    seg(11.04, 14.719, "I will not just tell you about this project that brother, this is a"),
+    seg(13.11, 14.719, "\n"),
+    seg(13.12, 16.64, "project.  You can create such projects to"),
+]
+
+
+def test_build_sentences_joins_fragments_and_splits_at_punctuation():
+    shuffled = CAPTIONS[::2] + CAPTIONS[1::2]
+    assert build_sentences(shuffled, 100) == [
+        seg(
+            0.0,
+            6.32,
+            "Hello everyone, in this video I am going to tell you about a project which is Docine.",
+        ),
+        seg(
+            6.32,
+            13.89,  # "project." takes its share of the fragment by length
+            "We are also using this Docine project practically for internal work and "
+            "I will not just tell you about this project that brother, this is a project.",
+        ),
+        seg(13.89, 16.64, "You can create such projects to"),
+    ]
+
+
+def test_build_sentences_splits_at_pauses_and_drops_tags():
+    captions = [
+        seg(0, 2, "so we start"),
+        seg(1, 3, "[Music]"),
+        seg(4, 6, "♪ ♪"),
+        seg(6, 8, "and then  we  go on ."),
+    ]
+    assert build_sentences(captions, 100) == [
+        seg(0, 1, "so we start"),
+        seg(6, 8, "and then we go on."),
+    ]
+
+
+def test_build_sentences_caps_length_after_a_comma():
+    text = "one two three four five six seven eight, nine ten eleven twelve 13 14"
+    words = text.split(" ")
+    captions = [seg(i, i + 1, w) for i, w in enumerate(words)]
+    assert build_sentences(captions, 100) == [
+        seg(0, 8, "one two three four five six seven eight,"),
+        seg(8, 14, "nine ten eleven twelve 13 14"),
+    ]
+
+
+def test_build_sentences_clips_to_duration():
+    captions = [seg(0, 5, "Hello there."), seg(9, 12, "Too late.")]
+    assert build_sentences(captions, 4) == [seg(0, 4, "Hello there.")]
+
+
+def test_transcript_validation():
+    good = {"language": "hi", "duration": 60, "segments": [seg(0, 2, "Hi."), seg(2, 2, "\n")]}
+    assert Transcript.model_validate(good).duration == 60
+    bad = [
+        {**good, "duration": float("nan")},
+        {**good, "duration": 0},
+        {**good, "segments": []},
+        {**good, "segments": [seg(0, 2, " ")]},
+        {**good, "segments": [seg(3, 2, "Hi.")]},
+        {**good, "segments": [seg(-1, 2, "Hi.")]},
+        {**good, "segments": [seg(0, float("inf"), "Hi.")]},
+        {**good, "segments": [seg(0, 2, "x" * 2000)]},
+    ]
+    for data in bad:
+        with pytest.raises(ValidationError):
+            Transcript.model_validate(data)
+
+
+def test_next_text_chunk_cuts_at_sentence_starts_and_covers_gaps():
+    starts = [1.0, 5.0, 12.0, 20.0, 48.0, 70.0]
+    first = next_text_chunk(starts, 100, [], 0, -1)
+    assert first == (0, 12.0)  # short, and starts at 0 so the timeline is covered
+    second = next_text_chunk(starts, 100, [first], 0, first[1])
+    assert second == (12.0, 20.0)  # long, but 48 would make it longer than 30 s
+    assert next_text_chunk(starts, 100, [(0, 70)], 0, 70) == (70, 100)  # tail taken whole
+
+
+def test_next_text_chunk_starts_at_playhead_sentence():
+    starts = [1.0, 5.0, 12.0, 20.0, 48.0, 70.0]
+    assert next_text_chunk(starts, 100, [(0, 12)], 50, 12) == (48.0, 70.0)
+    assert next_text_chunk(starts, 100, [(0, 12), (48, 100)], 50, 100) == (12, 20)  # wrap
+    assert next_text_chunk(starts, 100, [(0, 100)], 0, 100) is None
+    assert next_text_chunk([], 100, [], 0, -1) == (0, 100)  # no speech at all
+
+
+def schedule(starts, lengths, end):
+    """Place clips one after another as pipeline._process does, with exact speed-ups.
+
+    Returns (start, speed, played length) per clip."""
+    out, free = [], -math.inf
+    for i, (start, length) in enumerate(zip(starts, lengths)):
+        next_start = starts[i + 1] if i + 1 < len(starts) else None
+        start, speed, latest = place(start, free, length, next_start, end)
+        played = min(length / speed, latest - start)
+        out.append((start, speed, round(played, 3)))
+        free = start + played + GAP
+    return out
+
+
+def test_place_keeps_clips_that_fit_on_time():
+    assert schedule([0, 5, 10], [3, 3, 3], 15) == [(0, 1.0, 3), (5, 1.0, 3), (10, 1.0, 3)]
+
+
+def test_place_speeds_up_mildly_then_lags_and_catches_up():
+    plan = schedule([0, 2, 6], [2.1, 2.0, 1.0], 10)
+    assert plan[0][:2] == (0, round(2.1 / (2 - GAP), 3))  # within MILD: on time
+    assert plan[1][:2] == (2, 1.0)
+    plan = schedule([0, 2, 8], [3.0, 1.0, 1.0], 10)
+    assert plan[0][1] == MILD
+    assert plan[1][:2] == (round(3.0 / MILD + GAP, 2), 1.0)  # starts late, at natural speed
+    assert plan[2][:2] == (8, 1.0)  # caught up in the pause
+
+
+def test_place_caps_lag_and_speed_and_never_overlaps():
+    starts = [0, 1, 2, 3]
+    plan = schedule(starts, [2.0] * 4, 6)
+    for (start, speed, _), seg_start in zip(plan, starts):
+        assert start - seg_start <= MAX_LAG + 0.01
+        assert 1.0 <= speed <= MAX_SPEED
+    for (start, _, played), (next_start, _, _) in pairwise(plan):
+        assert start + played + GAP <= next_start + 0.01
+    start, _, played = plan[-1]
+    assert start + played <= 6 + 1e-6  # the chunk's last clip ends by the chunk's end
+    assert played < 2.0 / MAX_SPEED  # too much speech for the time: the last resort, cut
+
+
+def test_place_last_clip_speeds_up_to_end_by_chunk_end():
+    assert schedule([8], [2.4], 10) == [(8, 1.2, 2.0)]
 
 
 def test_netscape_cookies_load_in_yt_dlp():
